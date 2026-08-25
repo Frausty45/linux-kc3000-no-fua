@@ -179,7 +179,7 @@ enum nvme_quirks {
 	 */
 	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),
 	/*
-	 * The controller mishandles Force Unit Access writes, casing the SSD to heat up.
+	 * The controller mishandles Force Unit Access writes, causing the SSD to heat up.
 	 */
 	NVME_QUIRK_NO_FUA			= (1 << 23),
 };
