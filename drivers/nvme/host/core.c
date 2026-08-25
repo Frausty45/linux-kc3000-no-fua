@@ -2425,10 +2425,16 @@ static int nvme_update_ns_info_block(struct nvme_ns *ns,
 	    ns->head->ids.csi == NVME_CSI_ZNS)
 		nvme_update_zone_info(ns, &lim, &zi);
 
-	if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc)
-		lim.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA;
-	else
+	if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc) {
+		lim.features |= BLK_FEAT_WRITE_CACHE;
+
+		if (!(ns->ctrl->quirks & NVME_QUIRK_NO_FUA))
+			lim.features |= BLK_FEAT_FUA;
+		else
+			lim.features &= ~BLK_FEAT_FUA;
+	} else {
 		lim.features &= ~(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA);
+	}
 
 	if (info->is_rotational)
 		lim.features |= BLK_FEAT_ROTATIONAL;
