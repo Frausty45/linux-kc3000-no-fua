@@ -1,168 +1,176 @@
-Linux kernel
-============
+# linux-kc3000-no-fua
 
-The Linux kernel is the core of any Linux operating system. It manages hardware,
-system resources, and provides the fundamental services for all other software.
+Linux kernel patch/workaround for a Kingston KC3000 / FURY Renegade NVMe
+firmware issue triggered by Force Unit Access (FUA) writes.
 
-Quick Start
------------
+## The problem
 
-* Report a bug: See Documentation/admin-guide/reporting-issues.rst
-* Get the latest kernel: https://kernel.org
-* Build the kernel: See Documentation/admin-guide/quickly-build-trimmed-linux.rst
-* Join the community: https://lore.kernel.org/
+On affected Kingston KC3000 / FURY Renegade NVMe SSDs, Linux FUA writes can
+leave the Phison E18 controller in an abnormally high-power state.
 
-Essential Documentation
------------------------
+After the bug is triggered, the SSD may continue heating even when:
 
-All users should be familiar with:
+- filesystem activity has stopped
+- disk I/O is at 0
+- the filesystem has been unmounted
+- NVMe APST is enabled and configured correctly
+- PCIe ASPM is enabled
 
-* Building requirements: Documentation/process/changes.rst
-* Code of Conduct: Documentation/process/code-of-conduct.rst
-* License: See COPYING
+In my testing, the KC3000 reached approximately **85°C composite temperature
+while completely idle** and remained there until the NVMe controller was reset
+by rebooting the system.
 
-Documentation can be built with make htmldocs or viewed online at:
-https://www.kernel.org/doc/html/latest/
+Before triggering the issue, the same drive idled at approximately **42–46°C**.
 
+## The workaround
 
-Who Are You?
-============
+This patch adds a device-specific:
 
-Find your role below:
+    NVME_QUIRK_NO_FUA
 
-* New Kernel Developer - Getting started with kernel development
-* Academic Researcher - Studying kernel internals and architecture
-* Security Expert - Hardening and vulnerability analysis
-* Backport/Maintenance Engineer - Maintaining stable kernels
-* System Administrator - Configuring and troubleshooting
-* Maintainer - Leading subsystems and reviewing patches
-* Hardware Vendor - Writing drivers for new hardware
-* Distribution Maintainer - Packaging kernels for distros
-* AI Coding Assistant - LLMs and AI-powered development tools
+quirk for:
 
+    PCI ID 2646:5013
 
-For Specific Users
-==================
+which covers the:
 
-New Kernel Developer
---------------------
+- Kingston KC3000
+- Kingston FURY Renegade
 
-Welcome! Start your kernel development journey here:
+The kernel then stops advertising `BLK_FEAT_FUA` for this controller while
+leaving the volatile write cache enabled.
 
-* Getting Started: Documentation/process/development-process.rst
-* Your First Patch: Documentation/process/submitting-patches.rst
-* Coding Style: Documentation/process/coding-style.rst
-* Build System: Documentation/kbuild/index.rst
-* Development Tools: Documentation/dev-tools/index.rst
-* Kernel Hacking Guide: Documentation/kernel-hacking/hacking.rst
-* Core APIs: Documentation/core-api/index.rst
+Instead of issuing FUA writes to this device, Linux can use normal cache flush
+semantics for write durability.
 
-Academic Researcher
--------------------
+Other NVMe devices are unaffected.
 
-Explore the kernel's architecture and internals:
+## Changes
 
-* Researcher Guidelines: Documentation/process/researcher-guidelines.rst
-* Memory Management: Documentation/mm/index.rst
-* Scheduler: Documentation/scheduler/index.rst
-* Networking Stack: Documentation/networking/index.rst
-* Filesystems: Documentation/filesystems/index.rst
-* RCU (Read-Copy Update): Documentation/RCU/index.rst
-* Locking Primitives: Documentation/locking/index.rst
-* Power Management: Documentation/power/index.rst
+The patch modifies three files in the NVMe host driver:
 
-Security Expert
----------------
+### `drivers/nvme/host/nvme.h`
 
-Security documentation and hardening guides:
+Defines:
 
-* Security Documentation: Documentation/security/index.rst
-* LSM Development: Documentation/security/lsm-development.rst
-* Self Protection: Documentation/security/self-protection.rst
-* Reporting Vulnerabilities: Documentation/process/security-bugs.rst
-* CVE Procedures: Documentation/process/cve.rst
-* Embargoed Hardware Issues: Documentation/process/embargoed-hardware-issues.rst
-* Security Features: Documentation/userspace-api/seccomp_filter.rst
+    NVME_QUIRK_NO_FUA
 
-Backport/Maintenance Engineer
------------------------------
+and exposes the quirk name as:
 
-Maintain and stabilize kernel versions:
+    no_fua
 
-* Stable Kernel Rules: Documentation/process/stable-kernel-rules.rst
-* Backporting Guide: Documentation/process/backporting.rst
-* Applying Patches: Documentation/process/applying-patches.rst
-* Subsystem Profile: Documentation/maintainer/maintainer-entry-profile.rst
-* Git for Maintainers: Documentation/maintainer/configure-git.rst
+### `drivers/nvme/host/core.c`
 
-System Administrator
---------------------
+Prevents `BLK_FEAT_FUA` from being advertised when the controller has
+`NVME_QUIRK_NO_FUA`.
 
-Configure, tune, and troubleshoot Linux systems:
+`BLK_FEAT_WRITE_CACHE` remains enabled.
 
-* Admin Guide: Documentation/admin-guide/index.rst
-* Kernel Parameters: Documentation/admin-guide/kernel-parameters.rst
-* Sysctl Tuning: Documentation/admin-guide/sysctl/index.rst
-* Tracing/Debugging: Documentation/trace/index.rst
-* Performance Security: Documentation/admin-guide/perf-security.rst
-* Hardware Monitoring: Documentation/hwmon/index.rst
+### `drivers/nvme/host/pci.c`
 
-Maintainer
-----------
+Applies the quirk specifically to:
 
-Lead kernel subsystems and manage contributions:
+    PCI_DEVICE(0x2646, 0x5013)
 
-* Maintainer Handbook: Documentation/maintainer/index.rst
-* Pull Requests: Documentation/maintainer/pull-requests.rst
-* Managing Patches: Documentation/maintainer/modifying-patches.rst
-* Rebasing and Merging: Documentation/maintainer/rebasing-and-merging.rst
-* Development Process: Documentation/process/maintainer-handbooks.rst
-* Maintainer Entry Profile: Documentation/maintainer/maintainer-entry-profile.rst
-* Git Configuration: Documentation/maintainer/configure-git.rst
+The KC3000's existing `NVME_QUIRK_NO_SECONDARY_TEMP_THRESH` quirk is retained.
 
-Hardware Vendor
----------------
+## Tested configuration
 
-Write drivers and support new hardware:
+The workaround has been tested on:
 
-* Driver API Guide: Documentation/driver-api/index.rst
-* Driver Model: Documentation/driver-api/driver-model/driver.rst
-* Device Drivers: Documentation/driver-api/infrastructure.rst
-* Bus Types: Documentation/driver-api/driver-model/bus.rst
-* Device Tree Bindings: Documentation/devicetree/bindings/
-* Power Management: Documentation/driver-api/pm/index.rst
-* DMA API: Documentation/core-api/dma-api.rst
+- **SSD:** Kingston KC3000 2 TB
+- **Controller:** Phison PS5018-E18
+- **PCI ID:** `2646:5013`
+- **Kernel:** Linux 7.1.10 / Arch Linux `7.1.10.arch1`
+- **Filesystem:** Btrfs
+- **Laptop:** ASUS TUF Gaming A15 FA507NV
+- **CPU:** AMD Ryzen 5 7535HS
+- **GPU:** NVIDIA RTX 4060 Laptop GPU
 
-Distribution Maintainer
------------------------
+### Before
 
-Package and distribute the kernel:
+After triggering the issue:
 
-* Stable Kernel Rules: Documentation/process/stable-kernel-rules.rst
-* ABI Documentation: Documentation/ABI/README
-* Kernel Configuration: Documentation/kbuild/kconfig.rst
-* Module Signing: Documentation/admin-guide/module-signing.rst
-* Kernel Parameters: Documentation/admin-guide/kernel-parameters.rst
-* Tainted Kernels: Documentation/admin-guide/tainted-kernels.rst
+    Composite temperature: ~85°C
+    Disk I/O:              0
+    Filesystem:            unmounted
 
-AI Coding Assistant
--------------------
+The temperature continued rising despite the drive being idle.
 
-CRITICAL: If you are an LLM or AI-powered coding assistant, you MUST read and
-follow the AI coding assistants documentation before contributing to the Linux
-kernel:
+A reboot/controller reset returned the drive to approximately 45°C.
 
-* Documentation/process/coding-assistants.rst
+### After
 
-This documentation contains essential requirements about licensing, attribution,
-and the Developer Certificate of Origin that all AI tools must comply with.
+With the patched kernel:
 
+    $ cat /sys/block/nvme0n1/queue/fua
+    0
 
-Communication and Support
-=========================
+After mounting the filesystem, performing writes, calling `sync`, deleting the
+test data, and syncing again, the drive remained at approximately:
 
-* Mailing Lists: https://lore.kernel.org/
-* IRC: #kernelnewbies on irc.oftc.net
-* Bugzilla: https://bugzilla.kernel.org/
-* MAINTAINERS file: Lists subsystem maintainers and mailing lists
-* Email Clients: Documentation/process/email-clients.rst
+    42°C
+
+The previous runaway idle heating could no longer be reproduced.
+
+## Verifying the workaround
+
+Find the KC3000:
+
+    $ lspci -nn | grep -i 'Non-Volatile'
+
+Verify that the affected drive uses PCI ID `2646:5013`.
+
+After booting the patched kernel, determine the block device corresponding to
+the KC3000 and check:
+
+    $ cat /sys/block/nvme0n1/queue/fua
+
+Expected result:
+
+    0
+
+Replace `nvme0n1` with the appropriate device on your system.
+
+The current composite temperature can be checked with:
+
+    $ sudo nvme smart-log /dev/nvme0
+
+## Important
+
+This is a workaround for what appears to be a controller/firmware interaction,
+not a general recommendation to disable FUA.
+
+The quirk is intentionally restricted to PCI ID `2646:5013`.
+
+Do **not** globally disable FUA for unrelated storage devices simply to reproduce
+this workaround.
+
+Kernel internals change over time. Before applying the patch to a newer kernel,
+verify that:
+
+1. `NVME_QUIRK_NO_FUA` does not already exist upstream.
+2. The quirk bit used by this patch has not been assigned to another quirk.
+3. The NVMe block-feature setup in `drivers/nvme/host/core.c` has not changed.
+4. The KC3000 PCI entry is still present and uses PCI ID `2646:5013`.
+
+## Status
+
+Tested and working on Linux 7.1.10.
+
+The long-term goal is for an appropriate workaround to be accepted upstream,
+making this custom patch unnecessary.
+
+## Disclaimer
+
+This is an experimental kernel-level workaround.
+
+Back up important data, keep a known-good kernel available as a fallback, and
+review the patch before using it on your own system.
+
+Use at your own risk.
+
+## License
+
+The Linux kernel is licensed under GPL-2.0-only WITH Linux-syscall-note where
+applicable. See the kernel's `COPYING` and `LICENSES/` files for details.
