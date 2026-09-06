@@ -260,7 +260,7 @@ It is not intended as a general method of disabling FUA.
 ## Status
 
 Tested and working on:
-    Linux 7.1.10
+    Linux 7.1.10,
     Linux 7.2.3
 
 The long-term solution would be an appropriate fix or device quirk in the upstream Linux kernel, at which point maintaining this patch would no longer be necessary.
