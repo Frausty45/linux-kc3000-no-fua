@@ -1,0 +1,55 @@
+--- a/drivers/nvme/host/nvme.h
++++ b/drivers/nvme/host/nvme.h
+@@ -178,6 +178,10 @@
+ 	 * Align dma pool segment size to 512 bytes
+ 	 */
+ 	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),
++	/*
++	 * The controller mishandles Force Unit Access writes, casing the SSD to heat up.
++	 */
++	NVME_QUIRK_NO_FUA			= (1 << 23),
+ };
+ 
+ static inline char *nvme_quirk_name(enum nvme_quirks q)
+@@ -229,6 +233,8 @@
+ 		return "broken_msi";
+ 	case NVME_QUIRK_DMAPOOL_ALIGN_512:
+ 		return "dmapool_align_512";
++	case NVME_QUIRK_NO_FUA:
++		return "no_fua";
+ 	}
+ 
+ 	return "unknown";
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -2425,10 +2425,16 @@
+ 	    ns->head->ids.csi == NVME_CSI_ZNS)
+ 		nvme_update_zone_info(ns, &lim, &zi);
+ 
+-	if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc)
+-		lim.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA;
+-	else
++	if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc) {
++		lim.features |= BLK_FEAT_WRITE_CACHE;
++
++		if (!(ns->ctrl->quirks & NVME_QUIRK_NO_FUA))
++			lim.features |= BLK_FEAT_FUA;
++		else
++			lim.features &= ~BLK_FEAT_FUA;
++	} else {
+ 		lim.features &= ~(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA);
++	}
+ 
+ 	if (info->is_rotational)
+ 		lim.features |= BLK_FEAT_ROTATIONAL;
+--- a/drivers/nvme/host/pci.c
++++ b/drivers/nvme/host/pci.c
+@@ -4203,7 +4203,7 @@
+ 	{ PCI_DEVICE(0x2646, 0x2263),   /* KINGSTON A2000 NVMe SSD  */
+ 		.driver_data = NVME_QUIRK_NO_DEEPEST_PS, },
+ 	{ PCI_DEVICE(0x2646, 0x5013),   /* Kingston KC3000, Kingston FURY Renegade */
+-		.driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH, },
++		.driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH | NVME_QUIRK_NO_FUA, },
+ 	{ PCI_DEVICE(0x2646, 0x5018),   /* KINGSTON OM8SFP4xxxxP OS21012 NVMe SSD */
+ 		.driver_data = NVME_QUIRK_DISABLE_WRITE_ZEROES, },
+ 	{ PCI_DEVICE(0x2646, 0x5016),   /* KINGSTON OM3PGP4xxxxP OS21011 NVMe SSD */
