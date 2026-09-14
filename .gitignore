@@ -1,0 +1,9 @@
+linux/**
+
+!linux/drivers/
+!linux/drivers/nvme/
+!linux/drivers/nvme/host/
+
+!linux/drivers/nvme/host/nvme.h
+!linux/drivers/nvme/host/core.c
+!linux/drivers/nvme/host/pci.c
