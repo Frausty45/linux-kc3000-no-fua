@@ -1,0 +1,4 @@
+linux/
+
+echo '.idea/' >> .gitignore
+git add .gitignore
