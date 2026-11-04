@@ -1,31 +1,31 @@
---- a/drivers/nvme/host/nvme.h	2026-09-07 17:37:28.000000000 +0200
-+++ b/drivers/nvme/host/nvme.h	2026-09-15 00:34:26.998000000 +0200
-@@ -178,6 +178,11 @@
- 	 * Align dma pool segment size to 512 bytes
+--- a/drivers/nvme/host/nvme.h
++++ b/drivers/nvme/host/nvme.h
+@@ -183,6 +183,11 @@
+ 	 * Admin queue DMA buffers must be page aligned
  	 */
- 	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),
+ 	NVME_QUIRK_ADMIN_PAGE_ALIGN		= (1 << 23),
 +
 +	/*
-+	 * Controller behaves badly with FUA writes.
++	 * Controller firmware misbehaves with FUA writes.
 +	 */
-+	NVME_QUIRK_NO_FUA = (1 << 24),
++	NVME_QUIRK_NO_FUA				= (1 << 24),
  };
  
  static inline char *nvme_quirk_name(enum nvme_quirks q)
-@@ -229,6 +234,8 @@
- 		return "broken_msi";
- 	case NVME_QUIRK_DMAPOOL_ALIGN_512:
+@@ -236,6 +241,8 @@
  		return "dmapool_align_512";
+ 	case NVME_QUIRK_ADMIN_PAGE_ALIGN:
+ 		return "admin_page_align";
 +	case NVME_QUIRK_NO_FUA:
 +		return "no_fua";
  	}
  
  	return "unknown";
---- a/drivers/nvme/host/core.c	2026-09-07 17:37:28.000000000 +0200
-+++ b/drivers/nvme/host/core.c	2026-09-15 00:48:42.651000000 +0200
-@@ -2451,10 +2451,16 @@
- 	    ns->head->ids.csi == NVME_CSI_ZNS)
- 		nvme_update_zone_info(ns, &lim, &zi);
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -2461,10 +2461,16 @@
+ 				 "not enabling zoned mode");
+ 	}
  
 -	if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc)
 -		lim.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA;
@@ -43,16 +43,30 @@
  
  	if (info->is_rotational)
  		lim.features |= BLK_FEAT_ROTATIONAL;
---- a/drivers/nvme/host/pci.c	2026-09-07 17:37:28.000000000 +0200
-+++ b/drivers/nvme/host/pci.c	2026-09-15 00:54:40.432000000 +0200
-@@ -4206,7 +4206,9 @@
- 	{ PCI_DEVICE(0x2646, 0x2263),   /* KINGSTON A2000 NVMe SSD  */
- 		.driver_data = NVME_QUIRK_NO_DEEPEST_PS, },
- 	{ PCI_DEVICE(0x2646, 0x5013),   /* Kingston KC3000, Kingston FURY Renegade */
--		.driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH, },
-+		.driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH | NVME_QUIRK_NO_FUA, },
-+	{ PCI_DEVICE(0x2646, 0x501f),   /* Kingston FURY Renegade, hardware revision prolly */
-+		.driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH | NVME_QUIRK_NO_FUA, },
- 	{ PCI_DEVICE(0x2646, 0x5018),   /* KINGSTON OM8SFP4xxxxP OS21012 NVMe SSD */
- 		.driver_data = NVME_QUIRK_DISABLE_WRITE_ZEROES, },
- 	{ PCI_DEVICE(0x2646, 0x5016),   /* KINGSTON OM3PGP4xxxxP OS21011 NVMe SSD */
+@@ -3111,6 +3117,26 @@
+ 		.quirks = NVME_QUIRK_DELAY_BEFORE_CHK_RDY |
+ 			  NVME_QUIRK_NO_DEEPEST_PS |
+ 			  NVME_QUIRK_IGNORE_DEV_SUBNQN,
++	},
++	{
++		/*
++		 * Kingston KC3000 firmware EIFK51.2 can enter a persistent
++		 * high-temperature state after FUA writes.
++		 */
++		.vid = 0x2646,
++		.mn = "KINGSTON SKC3000D2048G",
++		.fr = "EIFK51.2",
++		.quirks = NVME_QUIRK_NO_FUA,
++	},
++	{
++		/*
++		 * Kingston FURY Renegade with the same firmware exhibits
++		 * similar thermal behavior.
++		 */
++		.vid = 0x2646,
++		.mn = "KINGSTON SFYRD2000G",
++		.fr = "EIFK51.2",
++		.quirks = NVME_QUIRK_NO_FUA,
+ 	}
+ };
+ 
