@@ -1,279 +1,122 @@
-# linux-kc3000-no-fua
+# Kingston KC3000 / FURY Renegade NVMe FUA workaround
 
-Linux kernel workaround for a Kingston KC3000 / FURY Renegade NVMe issue triggered by Force Unit Access (`FUA`) writes.
+A Linux kernel patch for a persistent overheating issue affecting some Kingston KC3000 and FURY Renegade SSDs running firmware `EIFK51.2`.
 
-On affected drives, FUA writes under Linux can leave the Phison E18 controller in an abnormally high-power state. The SSD may continue heating even after all I/O has stopped.
+This is an out-of-tree workaround, not an upstream kernel fix. The exact cause inside the SSD firmware is still unknown.
 
-This patch adds a device-specific `NVME_QUIRK_NO_FUA` quirk for the affected controller.
+## The problem
 
-## Problem
+On my Kingston KC3000 2 TB, NVMe writes using Force Unit Access (FUA) appear to trigger a high-power state that doesn't go away when the drive becomes idle. Once triggered, the SSD keeps heating up even with no significant disk activity. I've seen temperatures around 80-85°C at idle.
 
-On my Kingston KC3000, certain writes under Linux caused the drive to enter a persistent high-power state.
+Resetting the controller or rebooting clears the state, but FUA traffic can trigger it again. I haven't observed the same behavior under Windows.
 
-Once triggered, the drive continued heating even when:
+A FURY Renegade owner reported a similar problem in [Issue #1](https://github.com/Frausty45/linux-kc3000-no-fua/issues/1). Their testing also showed that turning FUA off *after* the drive had entered the hot state did not cool it down. FUA had to be disabled before normal disk activity resumed after a reboot.
 
-- Disk I/O was at 0
-- The filesystem was idle
-- The filesystem was unmounted
-- NVMe APST was enabled
-- PCIe ASPM was enabled
-- The controller was configured to enter its non-operational power state
+We don't know exactly what the firmware is doing internally, but the results so far point strongly toward FUA as the trigger.
 
-The composite temperature eventually reached approximately 85°C while the drive was completely idle.
+## The workaround
 
-Example from the affected state:
+The patch adds `NVME_QUIRK_NO_FUA` to the Linux NVMe driver. When the quirk applies, the driver stops advertising native FUA support to the block layer, while leaving the SSD's write cache enabled. The block layer can then use its normal write and flush handling instead of issuing native FUA requests.
 
-```text
-temperature                             : 83 °C
-Warning Temperature Time                : 1183
-Critical Composite Temperature Time     : 4
-Temperature Sensor 2                    : 90 °C
-```
+This does not disable the write cache or filesystem barriers. It also doesn't block raw NVMe commands issued directly to the controller.
 
-At the same time, `iostat` reported no activity.
+Earlier versions of this patch matched PCI device IDs. The current version uses the kernel's existing `core_quirks[]` table to match the NVMe vendor ID, model string and firmware revision. This avoids disabling FUA on drives with firmware that hasn't shown the problem.
 
-Unmounting the filesystem did not cause the drive to cool down. A reboot, which resets the NVMe controller, immediately restored normal behavior.
+### Device matching
 
-After rebooting without mounting the drive, the temperature dropped from approximately 49°C to 46°C and continued towards its normal idle temperature.
+| Model | Firmware | Behavior with this patch | Test status |
+| --- | --- | --- | --- |
+| `KINGSTON SKC3000D2048G` | `EIFK51.2` | FUA disabled | Tested on Linux 7.2.15 |
+| `KINGSTON SFYRD2000G` | `EIFK51.2` | FUA disabled | FUA-off workaround independently tested; this exact patch not yet tested |
+| `KINGSTON SFYRD2000G` | `EIFK31.6` | FUA unchanged | Independently observed working normally with FUA enabled |
+| Other model or firmware combinations | Any | FUA unchanged | Not covered by this patch |
 
-The same behavior had also occurred during a previous Linux installation, while the drive did not noticeably exhibit the problem under Windows.
+The entries use NVMe vendor ID `0x2646`. The PCI IDs seen in the reports are `2646:5013` and `2646:501f`, but PCI ID alone is no longer used to enable `NO_FUA`.
 
-## Cause
+## Implementation
 
-The behavior appears to be related to FUA writes sent to the Kingston KC3000 / FURY Renegade controller.
+The current patch changes two files:
 
-The affected controller has PCI ID:
+- `drivers/nvme/host/nvme.h`: adds `NVME_QUIRK_NO_FUA` at bit 24 and its name mapping.
+- `drivers/nvme/host/core.c`: adds the firmware-specific entries to `core_quirks[]` and skips `BLK_FEAT_FUA` when the quirk is active.
 
-```text
-2646:5013
-```
+`drivers/nvme/host/pci.c` is unchanged. Existing PCI-specific quirks, including `NVME_QUIRK_NO_SECONDARY_TEMP_THRESH` on `2646:5013`, are preserved.
 
-On the unmodified kernel, the NVMe driver advertises both:
+The core quirk is selected during initial controller identification, before the namespace queue limits are set. Linux currently doesn't rescan these firmware-dependent quirks on every controller reinitialization, so reboot and verify the result after a firmware update.
 
-```text
-BLK_FEAT_WRITE_CACHE
-BLK_FEAT_FUA
-```
+## Test results
 
-for controllers with a volatile write cache.
+### My KC3000
 
-After an FUA write triggers the problem, the KC3000 can remain in a high-power state despite having no active I/O.
+Tested on November 4, 2026:
 
-## Workaround
-
-The patch introduces:
-
-```c
-NVME_QUIRK_NO_FUA
-```
-
-and applies it specifically to:
-
-```c
-PCI_DEVICE(0x2646, 0x5013)
-```
-
-This PCI ID covers the Kingston KC3000 and Kingston FURY Renegade.
-
-When the quirk is active, the NVMe driver continues advertising:
-
-```text
-BLK_FEAT_WRITE_CACHE
-```
-
-but does not advertise:
-
-```text
-BLK_FEAT_FUA
-```
-
-for the affected controller.
-
-The write cache itself remains enabled. Linux can use cache flush semantics instead of FUA for write durability.
-
-Other NVMe controllers are unaffected.
-
-## Kernel Changes
-
-The patch modifies three files in the NVMe host driver.
-
-### `drivers/nvme/host/nvme.h`
-
-Adds the new quirk:
-
-```c
-NVME_QUIRK_NO_FUA = (1 << 23)
-```
-
-and its corresponding name:
-
-```c
-case NVME_QUIRK_NO_FUA:
-    return "no_fua";
-```
-
-### `drivers/nvme/host/core.c`
-
-FUA is only advertised when the controller does not have `NVME_QUIRK_NO_FUA`:
-
-```c
-if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc) {
-    lim.features |= BLK_FEAT_WRITE_CACHE;
-
-    if (!(ns->ctrl->quirks & NVME_QUIRK_NO_FUA))
-        lim.features |= BLK_FEAT_FUA;
-    else
-        lim.features &= ~BLK_FEAT_FUA;
-} else {
-    lim.features &= ~(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA);
-}
-```
-
-### `drivers/nvme/host/pci.c`
-
-The existing KC3000 / FURY Renegade entry is changed from:
-
-```c
-{ PCI_DEVICE(0x2646, 0x5013),
-    .driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH, },
-```
-
-to:
-
-```c
-{ PCI_DEVICE(0x2646, 0x5013),
-    .driver_data = NVME_QUIRK_NO_SECONDARY_TEMP_THRESH |
-                   NVME_QUIRK_NO_FUA, },
-```
-
-The existing `NVME_QUIRK_NO_SECONDARY_TEMP_THRESH` quirk is retained.
-
-## Tested Configuration
-
-| Component | Configuration |
+| Item | Result |
 | --- | --- |
-| SSD | Kingston KC3000 2 TB |
-| Controller | Phison PS5018-E18 |
+| SSD | Kingston KC3000 2 TB (`KINGSTON SKC3000D2048G`) |
 | PCI ID | `2646:5013` |
-| Kernel | Linux 7.1.10 / Arch Linux `7.1.10.arch1` |
-| Filesystem | Btrfs |
-| System | ASUS TUF Gaming A15 FA507NV |
-| CPU | AMD Ryzen 5 7535HS |
-| GPU | NVIDIA GeForce RTX 4060 Laptop GPU |
+| Firmware | `EIFK51.2` |
+| Kernel | `7.2.15-arch1-1-kc3000` (Arch Linux) |
+| `/sys/block/nvme0n1/queue/fua` | `0` |
+| Initial composite temperature | 37°C |
+| Composite temperature after a write test | 42°C |
 
-## Results
+The patched kernel built, installed and booted successfully, including the NVIDIA DKMS driver. The write test did not trigger the persistent overheating behavior. This is an initial functional test, not a long-term reliability result. Write-cache status should also be checked on each test system.
 
-### Unmodified kernel
+### Independent FURY Renegade test
 
-After triggering the issue:
+The tester in [Issue #1](https://github.com/Frausty45/linux-kc3000-no-fua/issues/1) reported a FURY Renegade (`KINGSTON SFYRD2000G`, PCI `2646:501f`, firmware `EIFK51.2`) at about 68.8°C while affected. With FUA disabled before normal filesystem activity after a clean reboot, its temperature dropped to about 34.9°C after roughly an hour.
 
-```text
-Composite temperature: ~85°C
-Disk I/O:              0
-Filesystem:            unmounted
+That test used a separate workaround on Linux 6.6, not this Linux 7.2.15 patch. It supports the approach, but the firmware-specific FURY Renegade entry still needs direct testing.
+
+The same tester also had a FURY Renegade with firmware `EIFK31.6` that operated normally with FUA enabled. That difference is why the current patch matches firmware rather than just the PCI ID.
+
+## Building on Arch Linux
+
+The current patch was generated against Linux 7.2.15 and tested with the Arch Linux `7.2.15.arch1-1` packaging sources. It may need rebasing for other kernel versions.
+
+Start with the matching official Arch `PKGBUILD` and `config.x86_64` in a separate build directory:
+
+1. Change `pkgbase=linux` to `pkgbase=linux-kc3000`.
+2. Add `kc3000-no-fua.patch` to `source=()` after the Arch kernel patch. The stock `prepare()` function already applies `.patch` files from `source=()`.
+3. Run `updpkgsums`.
+4. Run `makepkg -o` to check that the patch applies and source preparation succeeds.
+5. Run `makepkg -s` to build the packages.
+6. Install the resulting kernel and headers packages with `sudo pacman -U`.
+
+Keep your regular Arch kernel installed as a fallback. Before rebooting, check that your initramfs or UKI was generated correctly, any DKMS modules built successfully, and your bootloader entry points to the new kernel.
+
+The PKGBUILD also produces a documentation package, but you don't need it to boot the kernel.
+
+## Verifying the workaround
+
+First, confirm the model and firmware. Replace `/dev/nvme0` with the appropriate controller:
+
+```bash
+sudo nvme id ctrl /dev/nvme0 | grep -E '^(vid|mn|fr)[[:space:]]*:'
 ```
 
-The temperature remained high until the controller was reset by rebooting the system.
+After booting the patched kernel:
 
-### Patched kernel
-
-The patched kernel was built as:
-
-```text
-Linux 7.1.10-arch1-1-kc3000
+```bash
+uname -r
+cat /sys/block/nvme0n1/queue/fua
+cat /sys/block/nvme0n1/queue/write_cache
+sudo nvme log smart /dev/nvme0
 ```
 
-After booting it, the block layer correctly reported FUA as disabled for the KC3000:
+For a matching device, `fua` should be `0`, while `write_cache` should normally report `write back` if the drive advertises a volatile write cache. Make sure `/dev/nvme0` and `/sys/block/nvme0n1` refer to the same physical drive on your system.
 
-```console
-$ cat /sys/block/nvme0n1/queue/fua
-0
-```
+Check temperatures during normal use and after writes have stopped. I don't recommend deliberately re-enabling FUA on an affected drive just to reproduce the issue.
 
-The drive was then mounted and tested with a 1 GiB sequential write followed by `sync`. The test file was deleted and another `sync` was performed.
+## Current limitations
 
-The drive remained at approximately 42°C.
+- Only the listed model and firmware combinations are matched. Other capacities and firmware revisions may need separate entries.
+- The FURY Renegade entry has not yet been tested with this exact kernel patch.
+- This patch has not yet been accepted upstream.
 
-The runaway idle heating observed with FUA enabled could no longer be reproduced.
+## Links
 
-## Verification
+- [Issue #1: investigation and independent test results](https://github.com/Frausty45/linux-kc3000-no-fua/issues/1)
+- [Compiled Release](https://github.com/Frausty45/linux-kc3000-no-fua/releases/tag/Compiled)
 
-First identify the NVMe controller:
-
-```console
-$ lspci -nn | grep -i 'Non-Volatile'
-```
-
-The affected controller should have PCI ID:
-
-```text
-2646:5013
-```
-
-Determine which block device corresponds to the KC3000:
-
-```console
-$ lsblk -o NAME,MODEL
-```
-
-After booting a kernel containing the patch, check whether FUA is advertised:
-
-```console
-$ cat /sys/block/nvme0n1/queue/fua
-0
-```
-
-Replace `nvme0n1` with the appropriate block device if necessary.
-
-The composite temperature can be checked using `nvme-cli`:
-
-```console
-$ sudo nvme smart-log /dev/nvme0
-```
-
-For continuous monitoring:
-
-```console
-$ watch -n 5 "sudo nvme smart-log /dev/nvme0 | grep '^temperature'"
-```
-
-## Compatibility
-
-The current version has been tested with Linux 7.1.10.
-
-Kernel internals change over time. Before porting the patch to another kernel version, verify that:
-
-1. `NVME_QUIRK_NO_FUA` has not already been implemented upstream.
-2. Bit 23 in `enum nvme_quirks` has not been assigned to another quirk.
-3. The feature setup in `drivers/nvme/host/core.c` has not changed in a way that requires the patch to be adapted.
-4. The KC3000 / FURY Renegade entry still uses PCI ID `2646:5013`.
-5. The patch applies cleanly to the target kernel.
-
-## Scope
-
-This patch is a workaround for the behavior observed on the Kingston KC3000 / FURY Renegade controller.
-
-It is not intended as a general method of disabling FUA.
-
-`NVME_QUIRK_NO_FUA` is only assigned to PCI ID `2646:5013`. Other NVMe devices continue using the normal kernel behavior.
-
-## Status
-
-Tested and working on:
-    Linux 7.1.10,
-    7.2.3,
-    7.2.4
-
-The long-term solution would be an appropriate fix or device quirk in the upstream Linux kernel, at which point maintaining this patch would no longer be necessary.
-
-## Disclaimer
-
-This modifies the Linux NVMe driver and should be treated as an experimental workaround.
-
-Keep a known-good kernel available as a fallback and back up important data before testing a modified kernel.
-
-## License
-
-This repository is based on the Linux kernel source tree.
-
-The Linux kernel is licensed under GPL-2.0-only WITH Linux-syscall-note where applicable. See [`COPYING`](COPYING) and [`LICENSES/`](LICENSES/) for details.
+If you're seeing similar behavior, please open an issue with your exact model string, firmware revision, PCI ID, kernel version, FUA status and temperature readings. Reports from unaffected drives are useful too.
